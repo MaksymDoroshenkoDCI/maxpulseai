@@ -12,7 +12,11 @@ load_dotenv()
 import streamlit as st
 
 from shorts_agent.database import Database
-from shorts_agent.discovery import SerpApiDiscovery, VideoCandidate
+from shorts_agent.discovery import (
+    SerpApiDiscovery,
+    VideoCandidate,
+    YouTubeCreativeCommonsDiscovery,
+)
 from shorts_agent.models import ClipSegment, RightsRecord
 from shorts_agent.render import render_vertical_clip
 
@@ -111,9 +115,9 @@ def render_overview(database: Database) -> None:
         st.caption("Transcription, AI selection, and OAuth upload adapters are not configured in this version.")
 
 
-def render_discovery() -> None:
-    st.subheader("Find candidates")
-    st.caption("Search public metadata for ideas. Search results do not grant rights to reuse a video.")
+def render_discovery(database: Database) -> None:
+    st.subheader("Trend search")
+    st.caption("General trend results are for discovery only; they are not permission to reuse a video.")
     with st.form("discovery-form"):
         query_column, limit_column = st.columns([3, 1])
         query = query_column.text_input("Niche or search phrase", placeholder="science podcast clips")
@@ -150,6 +154,133 @@ def render_discovery() -> None:
             column_config={"Open": st.column_config.LinkColumn("Open video")},
         )
         st.warning("Only add a local file in Sources after confirming ownership or explicit permission.")
+
+    st.divider()
+    st.subheader("Creative Commons candidates")
+    st.caption(
+        "Search YouTube videos marked Creative Commons. The license filter is a lead, not legal verification; "
+        "review the video's license details and terms before approving it."
+    )
+    with st.form("creative-commons-search-form"):
+        cc_query_column, cc_limit_column = st.columns([3, 1])
+        cc_query = cc_query_column.text_input(
+            "Search licensed videos", placeholder="topic, creator, or channel"
+        )
+        cc_limit = cc_limit_column.number_input(
+            "Maximum results", min_value=1, max_value=20, value=10, key="cc_result_limit"
+        )
+        youtube_key = st.text_input(
+            "YouTube Data API key",
+            value=os.getenv("YOUTUBE_DATA_API_KEY", ""),
+            type="password",
+            help="Use YOUTUBE_DATA_API_KEY from your local .env or environment.",
+        )
+        cc_search_clicked = st.form_submit_button("Search Creative Commons", type="primary")
+
+    if cc_search_clicked:
+        if not cc_query.strip():
+            st.warning("Enter a search phrase first.")
+        else:
+            try:
+                candidates = YouTubeCreativeCommonsDiscovery(api_key=youtube_key).search(
+                    cc_query.strip(), int(cc_limit)
+                )
+                st.session_state["cc_candidates"] = candidates
+                st.session_state["cc_query"] = cc_query.strip()
+            except Exception as error:
+                st.error(f"Creative Commons search failed: {error}")
+
+    cc_candidates: list[VideoCandidate] = st.session_state.get("cc_candidates", [])
+    if cc_candidates:
+        st.caption(f"Filtered results for: {st.session_state.get('cc_query', '')}")
+        approvals = {
+            str(approval["video_id"]): approval
+            for approval in database.list_candidate_approvals()
+        }
+        for candidate in cc_candidates:
+            approved = candidate.video_id in approvals
+            with st.container(border=True):
+                title_column, status_column = st.columns([4, 1])
+                title_column.markdown(f"**[{candidate.title}]({candidate.url})**")
+                title_column.caption(
+                    f"{candidate.channel_title or 'Unknown channel'} · "
+                    f"{candidate.views or 'Views not provided'} · YouTube marks as Creative Commons"
+                )
+                status_column.success("Approved") if approved else status_column.info("Needs review")
+                if approved:
+                    approval = approvals[candidate.video_id]
+                    st.caption(
+                        f"Approved by {approval['approved_by']} on {approval['approved_at']}; "
+                        "license verification evidence is recorded."
+                    )
+                else:
+                    with st.form(f"approve-cc-{candidate.video_id}"):
+                        reviewer = st.text_input(
+                            "Responsible reviewer",
+                            value=os.getenv("RIGHTS_REVIEWER_NAME", ""),
+                            key=f"reviewer-{candidate.video_id}",
+                        )
+                        evidence = st.text_input(
+                            "License evidence / notes",
+                            value=candidate.url,
+                            key=f"evidence-{candidate.video_id}",
+                            help="Record where you verified the license and any attribution or reuse terms.",
+                        )
+                        attribution = st.text_area(
+                            "Attribution to include with the clip",
+                            value=f'{candidate.title} by {candidate.channel_title} — {candidate.url}',
+                            key=f"attribution-{candidate.video_id}",
+                            help="Creative Commons reuse requires attribution; adjust this to match the license terms.",
+                        )
+                        license_checked = st.checkbox(
+                            "I personally checked the video's license and reuse terms",
+                            key=f"license-check-{candidate.video_id}",
+                        )
+                        approve_clicked = st.form_submit_button(
+                            "Погоджено до нарізки", type="primary"
+                        )
+                    if approve_clicked:
+                        if not license_checked:
+                            st.error("Review and confirm the video's license terms before approval.")
+                        else:
+                            try:
+                                database.approve_candidate(
+                                    video_id=candidate.video_id,
+                                    title=candidate.title,
+                                    url=candidate.url,
+                                    channel_title=candidate.channel_title or "Unknown channel",
+                                    license_type=candidate.license_type,
+                                    rights_evidence=evidence,
+                                    attribution_text=attribution,
+                                    approved_by=reviewer,
+                                )
+                                st.success(
+                                    "Approval saved. This records your decision; downloading and clipping "
+                                    "the YouTube video are not enabled yet."
+                                )
+                            except (ValueError, sqlite3.Error) as error:
+                                st.error(str(error))
+
+    saved_approvals = database.list_candidate_approvals()
+    if saved_approvals:
+        st.divider()
+        st.subheader("Approved for clipping review")
+        show_table(
+            [
+                {
+                    "Title": approval["title"],
+                    "Channel": approval["channel_title"],
+                    "License marker": approval["license_type"],
+                        "Attribution": approval["attribution_text"],
+                    "Approved by": approval["approved_by"],
+                    "Evidence": approval["rights_evidence"],
+                    "Approved at": approval["approved_at"],
+                    "Video": approval["url"],
+                }
+                for approval in saved_approvals
+            ],
+            "No reviewed candidates yet.",
+        )
 
 
 def render_sources(database: Database) -> None:
@@ -321,6 +452,10 @@ def main() -> None:
         st.markdown("**Database**")
         st.caption(str(database.path))
         st.markdown(f"**SerpApi**  \n{'Connected' if os.getenv('SERPAPI_API_KEY') else 'Needs key'}")
+        st.markdown(
+            f"**YouTube CC search**  \n"
+            f"{'Connected' if os.getenv('YOUTUBE_DATA_API_KEY') else 'Needs key'}"
+        )
         st.markdown(f"**FFmpeg**  \n{'Ready' if shutil.which('ffmpeg') else 'Not installed'}")
         st.divider()
         st.caption("Local media only. Rights evidence is required before processing.")
@@ -344,7 +479,7 @@ def main() -> None:
     with overview_tab:
         render_overview(database)
     with discover_tab:
-        render_discovery()
+        render_discovery(database)
     with sources_tab:
         render_sources(database)
     with studio_tab:

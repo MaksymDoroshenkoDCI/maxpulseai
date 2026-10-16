@@ -59,6 +59,17 @@ class Database:
                     detail TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS candidate_approvals (
+                    video_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    channel_title TEXT NOT NULL,
+                    license_type TEXT NOT NULL,
+                    rights_evidence TEXT NOT NULL,
+                    attribution_text TEXT NOT NULL DEFAULT '',
+                    approved_by TEXT NOT NULL,
+                    approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
             queue_columns = {
@@ -66,6 +77,67 @@ class Database:
             }
             if "scheduled_for" not in queue_columns:
                 connection.execute("ALTER TABLE publication_queue ADD COLUMN scheduled_for TEXT")
+            approval_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(candidate_approvals)")
+            }
+            if "attribution_text" not in approval_columns:
+                connection.execute(
+                    "ALTER TABLE candidate_approvals ADD COLUMN attribution_text TEXT NOT NULL DEFAULT ''"
+                )
+
+    def approve_candidate(
+        self,
+        video_id: str,
+        title: str,
+        url: str,
+        channel_title: str,
+        license_type: str,
+        rights_evidence: str,
+        attribution_text: str,
+        approved_by: str,
+    ) -> None:
+        values = (video_id, title, url, channel_title, rights_evidence, attribution_text, approved_by)
+        if not all(value.strip() for value in values):
+            raise ValueError("Candidate details, rights evidence, attribution, and approver are required")
+        if license_type != "creativeCommon":
+            raise ValueError("Only candidates returned by the Creative Commons search can be approved here")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO candidate_approvals
+                         (video_id, title, url, channel_title, license_type, rights_evidence,
+                          attribution_text, approved_by)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(video_id) DO UPDATE SET
+                     title = excluded.title,
+                     url = excluded.url,
+                     channel_title = excluded.channel_title,
+                     license_type = excluded.license_type,
+                     rights_evidence = excluded.rights_evidence,
+                     attribution_text = excluded.attribution_text,
+                     approved_by = excluded.approved_by,
+                     approved_at = CURRENT_TIMESTAMP""",
+                 (
+                    video_id,
+                    title,
+                    url,
+                    channel_title,
+                    license_type,
+                    rights_evidence,
+                    attribution_text,
+                    approved_by,
+                 ),
+            )
+            connection.execute(
+                "INSERT INTO activity (event, detail) VALUES (?, ?)",
+                ("candidate_approved_for_clipping", f"{title.strip()} ({approved_by.strip()})"),
+            )
+
+    def list_candidate_approvals(self) -> list[dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM candidate_approvals ORDER BY approved_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def register_source(self, path: Path, rights: RightsRecord) -> SourceAsset:
         rights.validate()

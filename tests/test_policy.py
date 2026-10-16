@@ -1,9 +1,14 @@
+import json
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
 
 import pytest
 
 from shorts_agent.database import Database
+from shorts_agent.discovery import YouTubeCreativeCommonsDiscovery
 from shorts_agent.models import ClipSegment, PublicationRequest, RightsRecord
 
 
@@ -114,3 +119,57 @@ def test_publication_queue_rejects_unapproved_public_request(tmp_path: Path) -> 
 
     with pytest.raises(PermissionError, match="Human approval"):
         database.enqueue_publication(clip_id, "A title", "", "public", None)
+
+
+def test_candidate_approval_requires_evidence_and_named_reviewer(tmp_path: Path) -> None:
+    database = Database(tmp_path / "agent.sqlite3")
+    database.initialize()
+
+    with pytest.raises(ValueError, match="attribution, and approver"):
+        database.approve_candidate(
+            "video-1", "Title", "https://youtube.com/watch?v=video-1", "Channel",
+            "creativeCommon", "", "Attribution", "",
+        )
+
+    database.approve_candidate(
+        "video-1", "Title", "https://youtube.com/watch?v=video-1", "Channel",
+        "creativeCommon", "License details checked", "Title by Channel, link", "Channel owner",
+    )
+
+    approval = database.list_candidate_approvals()[0]
+    assert approval["approved_by"] == "Channel owner"
+    assert approval["rights_evidence"] == "License details checked"
+    assert approval["attribution_text"] == "Title by Channel, link"
+    assert database.list_activity(1)[0]["event"] == "candidate_approved_for_clipping"
+
+
+def test_candidate_approval_rejects_non_cc_marker(tmp_path: Path) -> None:
+    database = Database(tmp_path / "agent.sqlite3")
+    database.initialize()
+
+    with pytest.raises(ValueError, match="Creative Commons search"):
+        database.approve_candidate(
+            "video-1", "Title", "https://youtube.com/watch?v=video-1", "Channel",
+            "unverified", "License details checked", "Title by Channel, link", "Channel owner",
+        )
+
+
+def test_youtube_search_requests_creative_commons_filter() -> None:
+    payload = {
+        "items": [
+            {
+                "id": {"videoId": "video-1"},
+                "snippet": {"title": "CC video", "channelTitle": "Creator"},
+            }
+        ]
+    }
+    response = BytesIO(json.dumps(payload).encode())
+    with patch("shorts_agent.discovery.urlopen", return_value=response) as mocked_urlopen:
+        response.__enter__ = lambda: response
+        response.__exit__ = lambda *_: None
+        candidates = YouTubeCreativeCommonsDiscovery("test-key").search("science", 5)
+
+    request_url = mocked_urlopen.call_args.args[0]
+    assert parse_qs(urlparse(request_url).query)["videoLicense"] == ["creativeCommon"]
+    assert candidates[0].license_type == "creativeCommon"
+    assert candidates[0].url == "https://www.youtube.com/watch?v=video-1"

@@ -21,7 +21,7 @@ source .venv/bin/activate
 python -m pip install -e '.[test,dashboard]'
 ```
 
-Install FFmpeg separately to render clips. Copy `.env.example` to `.env` and configure `SERPAPI_API_KEY` only when using trend search. Set `SHORTS_AGENT_DATABASE` to change the SQLite database path.
+Install FFmpeg separately to render clips. Copy `.env.example` to `.env` and configure `SERPAPI_API_KEY` for general trend search and `YOUTUBE_DATA_API_KEY` for YouTube Creative Commons-filtered search. Set `SHORTS_AGENT_DATABASE` to change the SQLite database path. `RIGHTS_REVIEWER_NAME` can prefill the responsible reviewer's name in the dashboard.
 
 ## Streamlit dashboard
 
@@ -31,7 +31,7 @@ Run the local dashboard from the project root:
 streamlit run src/shorts_agent/dashboard.py
 ```
 
-The dashboard provides an overview, SerpApi candidate search, authorized local media intake, clip rendering, and a publication review queue. It records sources, rendered clips, queue items, and recent activity in SQLite. Search results are discovery leads only and are not imported as source media.
+The dashboard provides an overview, SerpApi trend search, YouTube Data API search filtered to videos marked Creative Commons, authorized local media intake, clip rendering, and a publication review queue. On each Creative Commons result, the responsible person can record license evidence, the required attribution text, and press **Погоджено до нарізки** after checking the video's actual license and terms. The approval, evidence, attribution, reviewer, and timestamp are stored in SQLite. A YouTube license marker is only a search filter, not a legal verification. This approval records the decision but does not download or cut the YouTube video; downloading and clipping search results are not implemented.
 
 The YouTube OAuth/upload and transcription/LLM providers are not implemented yet. The dashboard can prepare and review publication requests, but it does not claim to upload or schedule videos. Public or scheduled requests require a named approver; private is the default. Store secrets in your shell environment or a local `.env` file (never commit populated secrets).
 
