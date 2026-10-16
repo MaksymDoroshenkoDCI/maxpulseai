@@ -48,8 +48,8 @@ st.markdown(
     [data-testid="stMetric"] { background: #fff; padding: 18px 20px; border: 1px solid var(--line); border-radius: 8px; }
     [data-testid="stMetricLabel"] { color: var(--muted); }
     [data-testid="stMetricValue"] { font-family: 'Space Grotesk', sans-serif; color: var(--ink); }
-    [data-testid="stTabs"] button { font-weight: 600; }
-    [data-testid="stTabs"] button[aria-selected="true"] { color: var(--green); }
+    [data-testid="stTabs"] button,
+    [data-testid="stTabs"] button p { color: #000 !important; font-weight: 600; }
     div.stButton > button[kind="primary"], div.stFormSubmitButton > button[kind="primary"] {
       background: var(--green); border: 0; color: white; border-radius: 6px; font-weight: 700;
     }

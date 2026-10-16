@@ -1,8 +1,17 @@
 import json
 import os
+import ssl
 from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import urlopen
+
+import certifi
+
+
+def _open_json(url: str) -> dict[str, object]:
+    context = ssl.create_default_context(cafile=certifi.where())
+    with urlopen(url, timeout=20, context=context) as response:
+        return json.load(response)
 
 
 @dataclass(frozen=True)
@@ -27,8 +36,7 @@ class SerpApiDiscovery:
 
     def search(self, query: str, limit: int = 10) -> list[VideoCandidate]:
         params = urlencode({"engine": "youtube", "search_query": query, "api_key": self.api_key})
-        with urlopen(f"{self.endpoint}?{params}", timeout=20) as response:
-            payload = json.load(response)
+        payload = _open_json(f"{self.endpoint}?{params}")
         results = payload.get("video_results", [])[:limit]
         return [
             VideoCandidate(
@@ -64,8 +72,7 @@ class YouTubeCreativeCommonsDiscovery:
                 "key": self.api_key,
             }
         )
-        with urlopen(f"{self.endpoint}?{params}", timeout=20) as response:
-            payload = json.load(response)
+        payload = _open_json(f"{self.endpoint}?{params}")
         return [
             VideoCandidate(
                 video_id=item["id"]["videoId"],

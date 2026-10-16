@@ -1,4 +1,5 @@
 import json
+import ssl
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -170,6 +171,9 @@ def test_youtube_search_requests_creative_commons_filter() -> None:
         candidates = YouTubeCreativeCommonsDiscovery("test-key").search("science", 5)
 
     request_url = mocked_urlopen.call_args.args[0]
+    ssl_context = mocked_urlopen.call_args.kwargs["context"]
     assert parse_qs(urlparse(request_url).query)["videoLicense"] == ["creativeCommon"]
+    assert ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert ssl_context.check_hostname
     assert candidates[0].license_type == "creativeCommon"
     assert candidates[0].url == "https://www.youtube.com/watch?v=video-1"
