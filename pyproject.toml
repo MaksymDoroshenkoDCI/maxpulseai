@@ -13,6 +13,7 @@ dependencies = ["certifi>=2024.7.4"]
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 dashboard = ["streamlit>=1.42", "python-dotenv>=1.0"]
+youtube = ["google-api-python-client>=2.160", "google-auth-oauthlib>=1.2"]
 
 [project.scripts]
 shorts-agent = "shorts_agent.cli:main"

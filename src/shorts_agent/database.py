@@ -51,6 +51,9 @@ class Database:
                     approved_by TEXT,
                     scheduled_for TEXT,
                     status TEXT NOT NULL,
+                    youtube_video_id TEXT,
+                    uploaded_at TEXT,
+                    upload_error TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS activity (
@@ -77,6 +80,11 @@ class Database:
             }
             if "scheduled_for" not in queue_columns:
                 connection.execute("ALTER TABLE publication_queue ADD COLUMN scheduled_for TEXT")
+            for column in ("youtube_video_id", "uploaded_at", "upload_error"):
+                if column not in queue_columns:
+                    connection.execute(
+                        f"ALTER TABLE publication_queue ADD COLUMN {column} TEXT"
+                    )
             approval_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(candidate_approvals)")
             }
@@ -260,6 +268,47 @@ class Database:
                    ORDER BY q.created_at DESC"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def mark_publication_uploaded(self, request_id: str, youtube_video_id: str) -> None:
+        if not youtube_video_id.strip():
+            raise ValueError("YouTube video ID is required")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM publication_queue WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Publication request not found: {request_id}")
+            if row["status"] == "uploaded":
+                raise ValueError("This publication request has already been uploaded")
+            if row["status"] not in {"ready", "approved", "failed"}:
+                raise PermissionError("Publication request is not approved for upload")
+            connection.execute(
+                """UPDATE publication_queue SET status = 'uploaded', youtube_video_id = ?,
+                   uploaded_at = CURRENT_TIMESTAMP, upload_error = NULL WHERE request_id = ?""",
+                (youtube_video_id.strip(), request_id),
+            )
+            connection.execute(
+                "INSERT INTO activity (event, detail) VALUES (?, ?)",
+                ("youtube_upload_completed", youtube_video_id.strip()),
+            )
+
+    def mark_publication_failed(self, request_id: str, error: str) -> None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM publication_queue WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Publication request not found: {request_id}")
+            if row["status"] == "uploaded":
+                raise ValueError("An uploaded item cannot be marked failed")
+            connection.execute(
+                "UPDATE publication_queue SET status = 'failed', upload_error = ? WHERE request_id = ?",
+                (error[:1000], request_id),
+            )
+            connection.execute(
+                "INSERT INTO activity (event, detail) VALUES (?, ?)",
+                ("youtube_upload_failed", f"{request_id}: {error[:200]}"),
+            )
 
     def list_activity(self, limit: int = 12) -> list[dict[str, object]]:
         with self.connect() as connection:

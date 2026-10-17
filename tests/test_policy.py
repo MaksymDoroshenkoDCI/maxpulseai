@@ -11,6 +11,11 @@ import pytest
 from shorts_agent.database import Database
 from shorts_agent.discovery import YouTubeCreativeCommonsDiscovery
 from shorts_agent.models import ClipSegment, PublicationRequest, RightsRecord
+from shorts_agent.youtube import (
+    ChannelMismatchError,
+    build_video_resource,
+    verify_target_channel,
+)
 
 
 def test_source_requires_rights_evidence(tmp_path: Path) -> None:
@@ -177,3 +182,109 @@ def test_youtube_search_requests_creative_commons_filter() -> None:
     assert ssl_context.check_hostname
     assert candidates[0].license_type == "creativeCommon"
     assert candidates[0].url == "https://www.youtube.com/watch?v=video-1"
+
+
+def test_video_resource_defaults_to_private_and_keeps_metadata() -> None:
+    resource = build_video_resource(" A Short ", " Description ", PublicationRequest())
+
+    assert resource["snippet"]["title"] == "A Short"
+    assert resource["snippet"]["description"] == "Description"
+    assert resource["status"]["privacyStatus"] == "private"
+
+
+def test_scheduled_video_resource_uses_private_and_publish_at() -> None:
+    scheduled_for = datetime.now() + timedelta(days=1)
+    resource = build_video_resource(
+        "Scheduled short",
+        "Description",
+        PublicationRequest("scheduled", "channel-owner", scheduled_for),
+    )
+
+    assert resource["status"]["privacyStatus"] == "private"
+    assert resource["status"]["publishAt"].endswith("Z")
+
+
+def test_public_upload_resource_requires_named_approval() -> None:
+    with pytest.raises(PermissionError, match="Human approval"):
+        build_video_resource("Public short", "Description", PublicationRequest("public"))
+
+
+def test_oauth_channel_must_match_configured_channel() -> None:
+    class FakeRequest:
+        def execute(self) -> dict[str, object]:
+            return {"items": [{"id": "other-channel", "snippet": {"title": "Other"}}]}
+
+    class FakeChannels:
+        def list(self, **kwargs: object) -> FakeRequest:
+            assert kwargs == {"part": "id,snippet", "mine": True}
+            return FakeRequest()
+
+    class FakeService:
+        def channels(self) -> FakeChannels:
+            return FakeChannels()
+
+    with pytest.raises(ChannelMismatchError, match="not found among authorized channels"):
+        verify_target_channel(FakeService(), "expected-channel")
+
+
+def test_oauth_selects_expected_channel_from_multiple_channels() -> None:
+    class FakeRequest:
+        def execute(self) -> dict[str, object]:
+            return {
+                "items": [
+                    {"id": "other-channel", "snippet": {"title": "Other"}},
+                    {"id": "target-channel", "snippet": {"title": "My Channel"}},
+                ]
+            }
+
+    class FakeChannels:
+        def list(self, **kwargs: object) -> FakeRequest:
+            return FakeRequest()
+
+    class FakeService:
+        def channels(self) -> FakeChannels:
+            return FakeChannels()
+
+    assert verify_target_channel(FakeService(), "target-channel") == (
+        "target-channel",
+        "My Channel",
+    )
+
+
+def test_database_records_upload_and_prevents_duplicate_upload(tmp_path: Path) -> None:
+    media = tmp_path / "licensed.mp4"
+    media.write_bytes(b"placeholder")
+    database = Database(tmp_path / "agent.sqlite3")
+    database.initialize()
+    source = database.register_source(
+        media, RightsRecord("owned", "owner record", "channel-owner")
+    )
+    clip_id = database.record_clip(source.source_id, 0, 20, tmp_path / "clip.mp4")
+    request_id = database.enqueue_publication(clip_id, "A Short", "Description", "private", None)
+
+    database.mark_publication_uploaded(request_id, "youtube-video-123")
+
+    queued_item = database.list_publication_queue()[0]
+    assert queued_item["status"] == "uploaded"
+    assert queued_item["youtube_video_id"] == "youtube-video-123"
+    assert queued_item["uploaded_at"]
+    with pytest.raises(ValueError, match="already been uploaded"):
+        database.mark_publication_uploaded(request_id, "youtube-video-456")
+
+
+def test_database_records_upload_failure_for_retry(tmp_path: Path) -> None:
+    media = tmp_path / "licensed.mp4"
+    media.write_bytes(b"placeholder")
+    database = Database(tmp_path / "agent.sqlite3")
+    database.initialize()
+    source = database.register_source(
+        media, RightsRecord("owned", "owner record", "channel-owner")
+    )
+    clip_id = database.record_clip(source.source_id, 0, 20, tmp_path / "clip.mp4")
+    request_id = database.enqueue_publication(clip_id, "A Short", "Description", "private", None)
+
+    database.mark_publication_failed(request_id, "temporary network issue")
+
+    queued_item = database.list_publication_queue()[0]
+    assert queued_item["status"] == "failed"
+    assert queued_item["upload_error"] == "temporary network issue"

@@ -7,3 +7,7 @@ __pycache__/
 .env
 data/
 renders/
+.secrets/
+client_secret*.json
+youtube-oauth-client*.json
+youtube-token*.json

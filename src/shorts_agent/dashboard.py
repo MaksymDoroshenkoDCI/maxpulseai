@@ -19,6 +19,8 @@ from shorts_agent.discovery import (
 )
 from shorts_agent.models import ClipSegment, RightsRecord
 from shorts_agent.render import render_vertical_clip
+from shorts_agent.models import PublicationRequest
+from shorts_agent.youtube import get_authorized_youtube_service, upload_video
 
 
 st.set_page_config(
@@ -107,12 +109,19 @@ def render_overview(database: Database) -> None:
         st.subheader("Pipeline health")
         serpapi_ready = bool(os.getenv("SERPAPI_API_KEY"))
         ffmpeg_ready = shutil.which("ffmpeg") is not None
+        oauth_client = Path(
+            os.getenv("YOUTUBE_OAUTH_CLIENT_SECRETS")
+            or ".secrets/youtube-oauth-client.json"
+        )
         st.markdown(
             f"{'🟢' if serpapi_ready else '⚪'} SerpApi search {'connected' if serpapi_ready else 'not configured'}"
         )
         st.markdown(f"{'🟢' if ffmpeg_ready else '🟠'} FFmpeg {'ready' if ffmpeg_ready else 'not found'}")
-        st.markdown("⚪ YouTube upload not connected")
-        st.caption("Transcription, AI selection, and OAuth upload adapters are not configured in this version.")
+        st.markdown(
+            f"{'🟢' if oauth_client.is_file() else '⚪'} YouTube OAuth "
+            f"{'client configured' if oauth_client.is_file() else 'client not configured'}"
+        )
+        st.caption("Transcription and AI clip selection are not configured yet.")
 
 
 def render_discovery(database: Database) -> None:
@@ -381,13 +390,49 @@ def render_clip_studio(database: Database) -> None:
 
 
 def render_review_queue(database: Database) -> None:
+    st.subheader("YouTube channel")
+    client_secrets = Path(
+        os.getenv("YOUTUBE_OAUTH_CLIENT_SECRETS") or ".secrets/youtube-oauth-client.json"
+    )
+    token_file = Path(os.getenv("YOUTUBE_TOKEN_FILE") or "data/youtube-token.json")
+    expected_channel_id = os.getenv(
+        "YOUTUBE_CHANNEL_ID", "UCuofIedUoXyGTuyL0QA-DsQ"
+    )
+    st.caption(f"Target channel: {expected_channel_id}")
+    connect_column, switch_column, config_column = st.columns([1, 1, 2])
+    connect_clicked = connect_column.button("Connect / verify channel", type="primary")
+    switch_clicked = switch_column.button(
+        "Switch Google account", disabled=not token_file.is_file()
+    )
+    config_column.caption(f"OAuth client file: {client_secrets}")
+    if connect_clicked or switch_clicked:
+        try:
+            _, channel_title = get_authorized_youtube_service(
+                client_secrets,
+                token_file,
+                expected_channel_id,
+                force_reauthorize=switch_clicked,
+            )
+            st.session_state["youtube_connected_channel"] = channel_title
+            st.success(f"Connected and verified channel: {channel_title} ({expected_channel_id})")
+        except Exception as error:
+            st.error(f"Could not connect YouTube: {error}")
+
+    connected_channel = st.session_state.get("youtube_connected_channel")
+    if connected_channel:
+        st.success(f"Verified channel: {connected_channel} · {expected_channel_id}")
+    elif token_file.is_file():
+        st.info("OAuth token found. Use Connect / verify channel to confirm the selected account.")
+    else:
+        st.info("Connect with Google before uploading. The OAuth client JSON must be configured locally.")
+
     clips = database.list_clips()
     if not clips:
         st.info("Render a clip before preparing a publication request.")
         return
 
     st.subheader("Prepare publication metadata")
-    st.caption("Queue items are not uploaded. YouTube OAuth/upload is not connected yet.")
+    st.caption("Each upload requires a deliberate click. Private is the default visibility.")
     clip_options = {
         f"{Path(str(clip['path'])).name} · {str(clip['clip_id'])[:8]}": clip for clip in clips
     }
@@ -426,21 +471,81 @@ def render_review_queue(database: Database) -> None:
             st.error(str(error))
 
     queue_rows = database.list_publication_queue()
-    show_table(
-        [
-            {
-                "Created": row["created_at"],
-                "Title": row["title"],
-                "Visibility": row["visibility"],
-                "Status": row["status"],
-                "Scheduled for": row["scheduled_for"] or "—",
-                "Approved by": row["approved_by"] or "—",
-                "Clip": Path(str(row["clip_path"])).name,
-            }
-            for row in queue_rows
-        ],
-        "The publication queue is empty.",
-    )
+    if not queue_rows:
+        st.info("The publication queue is empty.")
+    for row in queue_rows:
+        with st.container(border=True):
+            st.markdown(f"**{row['title']}** · {row['status']}")
+            st.caption(
+                f"{Path(str(row['clip_path'])).name} · {row['visibility']} · "
+                f"Approved by: {row['approved_by'] or 'you at upload time'}"
+            )
+            if row["scheduled_for"]:
+                st.caption(f"Scheduled for local time: {row['scheduled_for']}")
+            if row["status"] == "uploaded" and row["youtube_video_id"]:
+                st.success("Upload complete")
+                st.link_button(
+                    "Open YouTube video",
+                    f"https://www.youtube.com/watch?v={row['youtube_video_id']}",
+                )
+                st.caption(f"Uploaded at: {row['uploaded_at']}")
+            elif row["upload_error"]:
+                st.error(f"Previous upload failed: {row['upload_error']}")
+
+            if row["status"] in {"ready", "approved", "failed"}:
+                video_path = Path(str(row["clip_path"]))
+                if not video_path.is_file():
+                    st.error("The rendered video file is missing; upload is disabled.")
+                    continue
+                if row["visibility"] in {"public", "scheduled"}:
+                    st.warning(
+                        f"This will publish as {row['visibility']}. Approval recorded by: {row['approved_by']}."
+                    )
+                upload_clicked = st.button(
+                    "Upload to my YouTube channel",
+                    key=f"upload-{row['request_id']}",
+                    type="primary",
+                    disabled=not client_secrets.is_file(),
+                )
+                if not client_secrets.is_file():
+                    st.caption("Add your OAuth Desktop client JSON at the configured path to enable upload.")
+                if upload_clicked:
+                    publication = PublicationRequest(
+                        str(row["visibility"]),
+                        str(row["approved_by"]) if row["approved_by"] else None,
+                        datetime.fromisoformat(str(row["scheduled_for"]))
+                        if row["scheduled_for"]
+                        else None,
+                    )
+                    try:
+                        service, channel_title = get_authorized_youtube_service(
+                            client_secrets, token_file, expected_channel_id
+                        )
+                        progress_bar = st.progress(0.0, text="Uploading to YouTube...")
+                        youtube_video_id = upload_video(
+                            service,
+                            video_path,
+                            str(row["title"]),
+                            str(row["description"]),
+                            publication,
+                            progress_callback=lambda value: progress_bar.progress(
+                                min(value, 1.0), text="Uploading to YouTube..."
+                            ),
+                        )
+                        database.mark_publication_uploaded(
+                            str(row["request_id"]), youtube_video_id
+                        )
+                        st.success(f"Uploaded to {channel_title}: {youtube_video_id}")
+                        st.link_button(
+                            "Open uploaded video",
+                            f"https://www.youtube.com/watch?v={youtube_video_id}",
+                        )
+                    except Exception as error:
+                        try:
+                            database.mark_publication_failed(str(row["request_id"]), str(error))
+                        except (LookupError, ValueError, sqlite3.Error):
+                            pass
+                        st.error(f"Upload failed: {error}")
 
 
 def main() -> None:
@@ -469,7 +574,7 @@ def main() -> None:
     st.markdown(
         '<div class="status-strip"><strong>Publishing is guarded.</strong> '
         'Private is the default; public or scheduled requests need a named approver. '
-        'Uploads remain unavailable until the YouTube OAuth adapter is connected.</div>',
+        'Every upload verifies the configured YouTube channel and requires a deliberate click.</div>',
         unsafe_allow_html=True,
     )
 
